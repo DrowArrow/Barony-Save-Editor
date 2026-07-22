@@ -8,6 +8,19 @@ import time
 BARONY_SAVE_EXT = ".baronysave"
 
 
+def bind_mousewheel(widget):
+    def _on_mousewheel(event):
+        if hasattr(event, "num") and event.num in {4, 5}:
+            widget.yview_scroll(-1 if event.num == 4 else 1, "units")
+            return
+        if hasattr(event, "delta"):
+            widget.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    widget.bind("<MouseWheel>", _on_mousewheel)
+    widget.bind("<Button-4>", lambda event: widget.yview_scroll(-1, "units"))
+    widget.bind("<Button-5>", lambda event: widget.yview_scroll(1, "units"))
+
+
 class ScrollableFrame(ttk.Frame):
     def __init__(self, container, *args, **kwargs):
         super().__init__(container, *args, **kwargs)
@@ -22,6 +35,7 @@ class ScrollableFrame(ttk.Frame):
 
         canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
+        bind_mousewheel(canvas)
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -95,7 +109,7 @@ class JsonEditorApp(tk.Tk):
         super().__init__()
         self.title("Barony Save Editor")
         self.geometry("1000x650")
-        self.resizable(True, True)
+        self.resizable(False, False)
 
         self.json_data = None
         self.current_file = None
@@ -110,6 +124,15 @@ class JsonEditorApp(tk.Tk):
 
         self._build_ui()
         self._load_config()
+
+    def _show_message(self, kind, title, message, parent=None):
+        if parent is None:
+            parent = self
+        if kind == "error":
+            return messagebox.showerror(title, message, parent=parent)
+        if kind == "warning":
+            return messagebox.showwarning(title, message, parent=parent)
+        return messagebox.showinfo(title, message, parent=parent)
 
     def _build_ui(self):
         main_frame = ttk.Frame(self, padding=10)
@@ -134,6 +157,7 @@ class JsonEditorApp(tk.Tk):
         self.file_list = tk.Listbox(left_panel, height=25)
         self.file_list.pack(fill="both", expand=True)
         self.file_list.bind("<<ListboxSelect>>", self.on_file_select)
+        bind_mousewheel(self.file_list)
 
         right_panel = ttk.Frame(main_frame)
         right_panel.pack(side="left", fill="both", expand=True)
@@ -300,7 +324,8 @@ class JsonEditorApp(tk.Tk):
             "mapseed": "Client savefile should have the same value as the host.",
             "dungeon_lvl": "Client savefile should have the same value as the host.",
             "level_track": "Client savefile should have the same value as the host.",
-            "multiplayer_type": "Host = 1 | Client = 2",
+            "multiplayer_type": "Singleplayer = 0 |Host = 1 | Client = 2",
+            "player_num": "Host should be 0; Client should be 1, 2 or 3 depending on which player slot they are in.",
             "players_connected": "Host is the first 1. the second third and fourth entries are 1 if there is a player for that slot or 0 if not.",
         }
 
@@ -378,7 +403,7 @@ class JsonEditorApp(tk.Tk):
     def open_validation_window(self):
         files = sorted(self.base_dir.glob(f"*{BARONY_SAVE_EXT}")) if hasattr(self, "base_dir") else []
         if not files:
-            messagebox.showinfo("No saves", "No save files available to compare. Select a folder first.")
+            self._show_message("info", "No saves", "No save files available to compare. Select a folder first.", parent=None)
             return
 
         win = tk.Toplevel(self)
@@ -392,18 +417,49 @@ class JsonEditorApp(tk.Tk):
         ttk.Label(selector_frame, text="Host file:").grid(row=0, column=0, sticky="e")
         host_combo = ttk.Combobox(selector_frame, values=[p.name for p in files], width=60, state="readonly")
         host_combo.grid(row=0, column=1, padx=8, sticky="w")
-        ttk.Label(selector_frame, text="Client file(s):").grid(row=1, column=0, sticky="ne", pady=(6,0))
 
-        # client list with scrollbar
-        client_list_frame = ttk.Frame(selector_frame)
-        client_list_frame.grid(row=1, column=1, columnspan=3, padx=8, pady=4, sticky="w")
-        client_list = tk.Listbox(client_list_frame, selectmode="multiple", exportselection=False, width=60, height=6)
-        client_list.pack(side="left", fill="y")
-        client_scroll = ttk.Scrollbar(client_list_frame, orient="vertical", command=client_list.yview)
-        client_scroll.pack(side="left", fill="y")
-        client_list.config(yscrollcommand=client_scroll.set)
-        for p in files:
-            client_list.insert(tk.END, p.name)
+        # client picker rendered as checkboxes so it feels cleaner and less cluttered
+        client_options_frame = ttk.LabelFrame(selector_frame, text="Client files")
+        client_options_frame.grid(row=1, column=1, columnspan=3, padx=8, pady=(6, 4), sticky="w")
+        client_options_frame.grid_remove()
+
+        client_canvas = tk.Canvas(client_options_frame, width=420, height=120, highlightthickness=0)
+        bind_mousewheel(client_canvas)
+        client_canvas.pack(side="left", fill="both", expand=True)
+        client_scroll = ttk.Scrollbar(client_options_frame, orient="vertical", command=client_canvas.yview)
+        client_scroll.pack(side="right", fill="y")
+        client_canvas.configure(yscrollcommand=client_scroll.set)
+
+        client_inner = ttk.Frame(client_canvas)
+        client_canvas.create_window((0, 0), window=client_inner, anchor="nw")
+        client_inner.bind("<Configure>", lambda event: client_canvas.configure(scrollregion=client_canvas.bbox("all")))
+
+        client_checkvars = {}
+
+        def refresh_client_checkboxes(host_name):
+            for child in client_inner.winfo_children():
+                child.destroy()
+            client_checkvars.clear()
+
+            if not host_name:
+                client_options_frame.grid_remove()
+                return
+
+            available_clients = [p.name for p in files if p.name != host_name]
+            if not available_clients:
+                ttk.Label(client_inner, text="No additional client saves available.", wraplength=360).pack(anchor="w", padx=6, pady=6)
+            else:
+                ttk.Label(client_inner, text="Select up to 3 client files to compare:", wraplength=360).pack(anchor="w", padx=6, pady=(4, 4))
+                for name in available_clients:
+                    var = tk.BooleanVar(value=False)
+                    client_checkvars[name] = var
+                    row = ttk.Frame(client_inner)
+                    row.pack(fill="x", padx=4, pady=2)
+                    ttk.Checkbutton(row, variable=var, text=name).pack(anchor="w")
+
+            client_options_frame.grid()
+            client_inner.update_idletasks()
+            client_canvas.configure(scrollregion=client_canvas.bbox("all"))
 
         # top button area next to selectors so controls are always visible
         selector_button_frame = ttk.Frame(selector_frame)
@@ -422,37 +478,34 @@ class JsonEditorApp(tk.Tk):
         compare_frame.columnconfigure(0, weight=1)
         compare_frame.columnconfigure(1, weight=1)
 
-        # default host selection
+        # leave the host selector blank until the user chooses a host explicitly
         if self.current_file and self.current_file.name in [p.name for p in files]:
             host_combo.set(self.current_file.name)
-        elif files:
-            host_combo.current(0)
-
-        # client list disabled until valid host chosen
-        client_list.config(state="disabled")
+        else:
+            host_combo.set("")
 
         def on_host_select(event=None):
             name = host_combo.get()
             if not name:
+                refresh_client_checkboxes("")
                 return
             path = self.base_dir / name
             try:
                 with path.open("r", encoding="utf-8") as f:
                     data = json.load(f)
             except Exception as exc:
-                messagebox.showerror("Load error", f"Could not read host file:\n{exc}")
+                self._show_message("error", "Load error", f"Could not read host file:\n{exc}", parent=win)
                 host_combo.set("")
-                client_list.config(state="disabled")
+                refresh_client_checkboxes("")
                 return
 
             if data.get("player_num") != 0 or data.get("multiplayer_type") != 1:
-                messagebox.showerror("Invalid host", "Selected host file is not a valid host save (player_num must be 0 and multiplayer_type must be 1).")
+                self._show_message("error", "Invalid host", "Selected host file is not a valid host save (player_num must be 0 and multiplayer_type must be 1).", parent=win)
                 host_combo.set("")
-                client_list.config(state="disabled")
+                refresh_client_checkboxes("")
                 return
 
-            # host validated
-            client_list.config(state="normal")
+            refresh_client_checkboxes(name)
 
         host_combo.bind("<<ComboboxSelected>>", on_host_select)
         # trigger validation if already set
@@ -476,12 +529,20 @@ class JsonEditorApp(tk.Tk):
         ]
 
         left_labels = {}
-        # header labels for host and client(s)
-        ttk.Label(left, text="Host", font=(None, 11, "bold")).pack(anchor="w")
-        ttk.Label(right, text="Client(s)", font=(None, 11, "bold")).pack(anchor="w")
+        # header labels placed in the shared grid so host and client columns align
+        ttk.Label(fields_frame, text="Host", font=(None, 11, "bold")).grid(row=0, column=1, sticky="nw", padx=4, pady=(0, 8))
+        client_header_frame = ttk.Frame(fields_frame)
+        client_header_frame.grid(row=0, column=2, sticky="nw", padx=4, pady=(0, 8))
+        client_top_frame = ttk.Frame(client_header_frame)
+        client_top_frame.pack(anchor="w")
+        ttk.Label(client_top_frame, text="Client(s)", font=(None, 11, "bold")).pack(side="left")
+        current_client_label = ttk.Label(client_top_frame, text="", font=(None, 9), foreground="#444444")
+        current_client_label.pack(side="left", padx=(8, 0))
+        rad_inner = ttk.Frame(client_header_frame)
+        rad_inner.pack(anchor="w", pady=(8, 0))
 
         # create key and host columns in the shared fields_frame
-        for i, key in enumerate(compare_keys, start=1):
+        for i, key in enumerate(compare_keys, start=2):
             ttk.Label(fields_frame, text=key).grid(row=i, column=0, sticky="w", padx=4, pady=4)
             lval = ttk.Label(fields_frame, text="", width=40)
             lval.grid(row=i, column=1, sticky="w", padx=4)
@@ -490,26 +551,26 @@ class JsonEditorApp(tk.Tk):
 
         def do_compare():
             host_name = host_combo.get()
-            sel = client_list.curselection()
-            if not host_name or not sel:
-                messagebox.showwarning("Select files", "Please select a valid host and at least one client (up to 3) to compare.")
+            selected_client_names = [name for name, var in client_checkvars.items() if var.get()]
+            if not host_name or not selected_client_names:
+                self._show_message("warning", "Select files", "Please select a valid host and at least one client (up to 3) to compare.", parent=win)
                 return
-            if len(sel) > 3:
-                messagebox.showwarning("Too many clients", "Please select up to 3 client files to compare.")
+            if len(selected_client_names) > 3:
+                self._show_message("warning", "Too many clients", "Please select up to 3 client files to compare.", parent=win)
                 return
 
-            client_names = [client_list.get(i) for i in sel]
+            client_names = selected_client_names
             host_path = self.base_dir / host_name
             try:
                 with host_path.open("r", encoding="utf-8") as f:
                     host_data = json.load(f)
             except Exception as exc:
-                messagebox.showerror("Load error", f"Could not read host file:\n{exc}")
+                self._show_message("error", "Load error", f"Could not read host file:\n{exc}", parent=win)
                 return
 
             # validate host
             if host_data.get("player_num") != 0 or host_data.get("multiplayer_type") != 1:
-                messagebox.showerror("Invalid host", "Selected host file does not look like a valid host save (player_num must be 0 and multiplayer_type must be 1).")
+                self._show_message("error", "Invalid host", "Selected host file does not look like a valid host save (player_num must be 0 and multiplayer_type must be 1).", parent=win)
                 return
 
             # populate host values into the left column
@@ -517,8 +578,15 @@ class JsonEditorApp(tk.Tk):
                 left_labels[key].config(text=str(host_data.get(key, "<MISSING>")), foreground="black")
 
             # clear previous client column in shared fields_frame (column 2)
+            # keep header at row 0 intact; only remove rows for actual client fields (row >= 1)
             for child in fields_frame.grid_slaves(column=2):
-                child.destroy()
+                info = child.grid_info()
+                try:
+                    r = int(info.get('row', 0))
+                except Exception:
+                    r = 0
+                if r >= 1:
+                    child.destroy()
 
             # remove any existing radio/button frames from previous compares
             if hasattr(win, '_rad_frame'):
@@ -541,22 +609,34 @@ class JsonEditorApp(tk.Tk):
             client_widgets = {}
             client_paths = {}
             client_datas = {}
+            client_names_by_index = {}
 
-            # radio buttons container (placed above client column)
-            rad_frame = ttk.Frame(right)
-            rad_frame.pack(anchor="w", pady=(0,6))
-            win._rad_frame = rad_frame
-            ttk.Label(rad_frame, text="Client slot:").pack(side="left")
+            # create a fresh inner radio container inside the header cell (previous one may have been destroyed)
+            rad_inner = ttk.Frame(client_header_frame)
+            rad_inner.pack(anchor="w", pady=(8, 0))
+            # reference the inner radio container so we can destroy radios without removing the header
+            win._rad_frame = rad_inner
+            ttk.Label(rad_inner, text="Client slot:", font=(None, 9)).pack(side="left")
             selected_client = tk.IntVar(value=0)
+            # persist the IntVar on window to prevent GC issues
+            win._selected_client = selected_client
 
             def show_client(idx):
-                # clear existing client column
+                current_client_label.config(text=client_names_by_index.get(idx, ""))
+                # clear existing client column but preserve header row (row 0)
                 for child in fields_frame.grid_slaves(column=2):
-                    child.destroy()
+                    info = child.grid_info()
+                    try:
+                        r = int(info.get('row', 0))
+                    except Exception:
+                        r = 0
+                    if r >= 2:
+                        child.destroy()
                 data = client_datas.get(idx)
                 if data is None:
                     return
-                for i, key in enumerate(compare_keys, start=1):
+                any_mismatch = False
+                for i, key in enumerate(compare_keys, start=2):
                     cval = data.get(key, "<MISSING>")
                     entry = ttk.Entry(fields_frame, width=30)
                     entry.insert(0, str(cval))
@@ -583,12 +663,12 @@ class JsonEditorApp(tk.Tk):
                         if mismatch:
                             reason = "Entries indicate which player slots are occupied; first entry is host."
 
-
                     if mismatch:
                         entry.config(foreground="red")
                         left_labels[key].config(foreground="red")
                         if reason:
                             ToolTip(entry, reason)
+                        any_mismatch = True
                     else:
                         entry.config(foreground="green")
                         left_labels[key].config(foreground="green")
@@ -607,6 +687,8 @@ class JsonEditorApp(tk.Tk):
 
                     client_widgets.setdefault(idx, {})[key] = (entry, data)
 
+                current_client_label.config(foreground="red" if any_mismatch else "green")
+
             # load client datas and create radio buttons
             for col, cname in enumerate(client_names):
                 cpath = self.base_dir / cname
@@ -614,12 +696,13 @@ class JsonEditorApp(tk.Tk):
                     with cpath.open("r", encoding="utf-8") as f:
                         cdata = json.load(f)
                 except Exception as exc:
-                    messagebox.showerror("Load error", f"Could not read client file {cname}:\n{exc}")
+                    self._show_message("error", "Load error", f"Could not read client file {cname}:\n{exc}", parent=win)
                     continue
 
                 client_paths[col] = cpath
                 client_datas[col] = cdata
-                ttk.Radiobutton(rad_frame, text=str(col + 1), variable=selected_client, value=col, command=lambda i=col: show_client(i)).pack(side="left", padx=4)
+                client_names_by_index[col] = cname
+                ttk.Radiobutton(rad_inner, text=str(col + 1), variable=selected_client, value=col, command=lambda i=col: show_client(i)).pack(side="left", padx=4)
 
                 # color host mismatches when loading
                 for key in compare_keys:
@@ -640,12 +723,13 @@ class JsonEditorApp(tk.Tk):
                     else:
                         left_labels[key].config(foreground="green")
 
-            # show first client if present
+            # show first client if present and ensure its radio is selected
             if client_datas:
+                win._selected_client.set(0)
                 show_client(0)
 
             def apply_updates():
-                if not messagebox.askyesno('Confirm updates', 'Apply updates to selected client file(s)? Backups will be created automatically.'):
+                if not messagebox.askyesno('Confirm updates', 'Apply updates to selected client file(s)? Backups will be created automatically.', parent=win):
                     return
                 # iterate through clients and write updates
                 for col, mapping in client_widgets.items():
@@ -691,7 +775,7 @@ class JsonEditorApp(tk.Tk):
                             else:
                                 new_value = raw
                         except Exception as exc:
-                            messagebox.showerror('Invalid value', f'Could not convert value for {key} in {cpath.name}: {exc}')
+                            self._show_message('error', 'Invalid value', f'Could not convert value for {key} in {cpath.name}: {exc}', parent=win)
                             return
 
                         cdata[key] = new_value
@@ -701,10 +785,10 @@ class JsonEditorApp(tk.Tk):
                         with cpath.open('w', encoding='utf-8') as f:
                             json.dump(cdata, f, indent=2, ensure_ascii=False)
                     except Exception as exc:
-                        messagebox.showerror('Save failed', f'Could not save {cpath.name}:\n{exc}')
+                        self._show_message('error', 'Save failed', f'Could not save {cpath.name}:\n{exc}', parent=win)
                         return
 
-                messagebox.showinfo('Updated', 'Selected client files updated successfully.')
+                self._show_message('info', 'Updated', 'Selected client files updated successfully.', parent=win)
 
             # place Apply Updates into the selector button area so it's visible
             ttk.Button(selector_button_frame, text='Apply Updates', command=apply_updates).pack(side="top", pady=4)
@@ -756,7 +840,7 @@ class JsonEditorApp(tk.Tk):
 
     def save_changes(self):
         if self.json_data is None or self.current_file is None:
-            messagebox.showwarning("No data", "There is no JSON file loaded to save.")
+            self._show_message("warning", "No data", "There is no JSON file loaded to save.", parent=self)
             return
 
         # create backup before saving
@@ -798,7 +882,7 @@ class JsonEditorApp(tk.Tk):
                     else:
                         new_value = json.loads(raw_text)
             except Exception as exc:
-                messagebox.showerror("Invalid value", f"Could not convert value for {path}: {exc}")
+                self._show_message("error", "Invalid value", f"Could not convert value for {path}: {exc}", parent=self)
                 return
 
             nested_set(updated, path_tokens, new_value)
@@ -807,20 +891,20 @@ class JsonEditorApp(tk.Tk):
             with self.current_file.open("w", encoding="utf-8") as f:
                 json.dump(updated, f, indent=2, ensure_ascii=False)
         except Exception as exc:
-            messagebox.showerror("Save failed", f"Could not save JSON file:\n{exc}")
+            self._show_message("error", "Save failed", f"Could not save JSON file:\n{exc}", parent=self)
             return
 
         self.json_data = updated
-        messagebox.showinfo("Saved", f"Saved changes to {self.current_file.name}")
+        self._show_message("info", "Saved", f"Saved changes to {self.current_file.name}", parent=self)
 
     def restore_backup(self):
         # open a single window listing saves that actually have backups
         if not hasattr(self, "base_dir"):
-            messagebox.showinfo("No folder", "Select a save folder first.")
+            self._show_message("info", "No folder", "Select a save folder first.", parent=self)
             return
         backups_dir = self.base_dir / "backups"
         if not backups_dir.exists():
-            messagebox.showinfo("No backups", "No backups directory found.")
+            self._show_message("info", "No backups", "No backups directory found.", parent=self)
             return
 
         # find saves in base_dir that have backups
@@ -831,12 +915,13 @@ class JsonEditorApp(tk.Tk):
                 saves_with_backups.append(p.name)
 
         if not saves_with_backups:
-            messagebox.showinfo("No backups", "No backups found for any saves in the selected folder.")
+            self._show_message("info", "No backups", "No backups found for any saves in the selected folder.", parent=win)
             return
 
         win = tk.Toplevel(self)
         win.title("Restore Backup")
         win.geometry("900x420")
+        win.resizable(False, False)
 
         left = ttk.Frame(win, padding=8)
         left.pack(side="left", fill="y")
@@ -845,12 +930,14 @@ class JsonEditorApp(tk.Tk):
 
         ttk.Label(left, text="Saves With Backups", font=(None, 11, "bold")).pack(anchor="w")
         saves_list = tk.Listbox(left, width=40, height=20, exportselection=False)
+        bind_mousewheel(saves_list)
         saves_list.pack(fill="y", expand=True)
         for name in saves_with_backups:
             saves_list.insert(tk.END, name)
 
         ttk.Label(right, text="Backups", font=(None, 11, "bold")).pack(anchor="w")
         backups_list = tk.Listbox(right, width=60, height=12, exportselection=False)
+        bind_mousewheel(backups_list)
         backups_list.pack(fill="x")
 
         # quick restore button directly under backups list for visibility
@@ -861,6 +948,7 @@ class JsonEditorApp(tk.Tk):
         details_title = ttk.Label(right, text="Backup details", font=(None, 11, "bold"))
         details_title.pack(anchor="w", pady=(6,0))
         details = tk.Text(right, height=10)
+        bind_mousewheel(details)
         details.pack(fill="both", expand=True)
 
         # storage for current backup paths
@@ -924,20 +1012,20 @@ class JsonEditorApp(tk.Tk):
         def do_restore():
             sel = backups_list.curselection()
             if not sel:
-                messagebox.showwarning('No selection', 'Select a backup to restore.')
+                self._show_message('warning', 'No selection', 'Select a backup to restore.', parent=win)
                 return
             if selected_target is None:
-                messagebox.showerror('No target', 'No target save selected.')
+                self._show_message('error', 'No target', 'No target save selected.', parent=win)
                 return
             bp = backup_paths[sel[0]]
             if not messagebox.askyesno('Confirm restore', f'Restore {bp.name} to {selected_target.name}? This will overwrite the target file.'):
                 return
             try:
                 shutil.copy2(bp, selected_target)
-                messagebox.showinfo('Restored', f'Restored {bp.name} to {selected_target.name}')
+                self._show_message('info', 'Restored', f'Restored {bp.name} to {selected_target.name}', parent=win)
                 win.destroy()
             except Exception as exc:
-                messagebox.showerror('Restore failed', f'Could not restore backup:\n{exc}')
+                self._show_message('error', 'Restore failed', f'Could not restore backup:\n{exc}', parent=win)
 
         btn_frame = ttk.Frame(right)
         btn_frame.pack(fill='x', pady=(6,0))
@@ -948,6 +1036,7 @@ class JsonEditorApp(tk.Tk):
         win = tk.Toplevel(self)
         win.title('Settings')
         win.geometry('400x220')
+        win.resizable(False, False)
 
         frame = ttk.Frame(win, padding=10)
         frame.pack(fill='both', expand=True)
@@ -967,10 +1056,10 @@ class JsonEditorApp(tk.Tk):
                 self.backup_max_per_save = int(max_backups_var.get())
                 self.backup_max_age_days = int(max_age_var.get())
             except Exception:
-                messagebox.showerror('Invalid', 'Please enter valid integer values.')
+                self._show_message('error', 'Invalid', 'Please enter valid integer values.', parent=win)
                 return
             self._save_config()
-            messagebox.showinfo('Saved', 'Settings saved.')
+            self._show_message('info', 'Saved', 'Settings saved.', parent=win)
             win.destroy()
 
         btns = ttk.Frame(frame)
