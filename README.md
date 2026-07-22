@@ -19,3 +19,6 @@
 - This GUI is implemented with Tkinter and targets Windows & Linux.
 - The app edits JSON-formatted Barony save files (`.baronysave`), while it may work for other json files there is no guarantee as to how well that will work.
 - Backups are stored in a `backups/` folder next to the selected save directory.
+
+## Disclosure
+Barony Save Editor was made using prompts given to AI in Visual Studio Code.
